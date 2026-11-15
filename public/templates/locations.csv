@@ -1,0 +1,5 @@
+pickup,drop,distance_km,distance_source
+Sample Point A,Sample Point B,1.5,uploaded_distance_estimate
+Sample Point B,Sample Point C,3.2,uploaded_distance_estimate
+Sample Point C,Sample Point D,5.1,uploaded_distance_estimate
+Sample Point D,Sample Point A,7.4,uploaded_distance_estimate

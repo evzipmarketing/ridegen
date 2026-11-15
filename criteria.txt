@@ -1,0 +1,48 @@
+changes in existing 
+-remove curreny field, as its indian rupee by default
+-hardcode working days per pilot to 26days
+-instead of shift start and end, i will metion idle time in vehicle database file 
+-remove min gap between rides field and make a logic as each vehicle should be between 4-5min. not exact round figures
+-random seed remove field, i dont know what that mean
+-apply logic in backend rules only for day off as 1 day per pilot, remove field
+
+all fields required
+-rides for period - select to and from dates
+-pickup & Drop locations with distance - upload
+-driver names - upload 
+-user names with id and registered dates -upload
+-vehicle details like idle date, idle vehicle number, idle vehicle make, idle timings-upload
+-Target revenue (check box if its net or gross)- typing field
+-avg price/km - typing field
+-min user fare - typing field
+-existing rides data- optional (checkbox if rides need to be generated only with existing vehicles/pilots in data uplaoded)
+
+
+
+update criteria if anything is missing or different in existing rules.
+-only generate rides for idle vehicles between idle timinings on mentioned dates in the database file
+for example: TG08T5465 is idle on 29 & 30 oct 2025 between 20:00-5:00, so sythetic rides should be generated only on those two dates between those idle timings
+-synthetic ride request times should not look machine-generated. spread them more naturally across each idle window
+-make sure no 2 rides are overlapped to same vehicle at same timestamp 
+-maintain min user fare as per entered
+-keep fare always in round figures, dont use decimals
+-keep fare randomly between min and max fare 
+-make sure not to have same fare for more than 2 or 3 rides
+-Use Pickup & Drop locations from database sheet according to distance
+-Maintain distance of ride should match average price per km field 
+-Use driver names from database and make sure no 2 rides are overlapped to same driver at same timestamp 
+-make sure none of the fares should be below min user fare for rides below 2km of distance. 
+-assign user id and user names from database file randomly but make sure not to overlap 2 rides to same user at same time 
+-make sure rides assigned to user should be later than user registered date
+-GST is calculated at 5%. if target revenue is selected as net, reverse calculate gross. if selected gross, then remove GST to get net.
+-generate ride ids
+-if existing rides data has been uploaded and checkbox is selected, generate rides between idle time between rides  using only vehicles, pilots mentioned in the data.
+- make sure to add a column marking all synthetic genrated rides
+
+
+
+
+
+
+
+
