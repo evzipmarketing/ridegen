@@ -52,7 +52,7 @@ export function ReferenceEditor({ kind }: { kind: DatasetKind }) {
       <input id={`upload-${kind}`} type="file" accept=".csv,.xls,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile} disabled={busy} aria-describedby={`${kind}-file-help`} />
       <div id={`${kind}-file-help`} className="file-help"><a href={`/templates/${kind}.csv`} download>CSV template</a><span>{busy ? "Reading file..." : "CSV / XLS / XLSX"}</span><span>5 MB max / no record-count limit</span></div>
     </div>
-    <p className="field-note">Required: {kind === "customers" ? "user_ID, user_name, date_registered" : definition.columns.join(", ")}.{definition.optionalColumns.length > 0 && <> Optional: {definition.optionalColumns.join(", ")}.</>}</p>
+    <p className="field-note">Required: {kind === "customers" ? "user_ID, user_name, date_registered" : kind === "existing" ? "request_made_at, vehicle_no" : definition.columns.join(", ")}.{definition.optionalColumns.length > 0 && <> Optional: {kind === "existing" ? "user_id, user_name, driver_name, pickup_address, drop_address, distance_covered, net_fare, driver_id, ride_id, end_at" : definition.optionalColumns.join(", ")}.</>}</p>
     {errors.length > 0 && <div className="inline-errors" role="alert"><strong>Nothing changed. Please check:</strong><ul>{errors.slice(0, 5).map((error, index) => <li key={index}>{error}</li>)}</ul>{errors.length > 5 && <p>{errors.length - 5} more errors in this file.</p>}</div>}
     {current.rows.length > 0 && <div className="preview-actions"><button className="text-button" disabled={busy} onClick={() => { clearDataset(kind); setErrors([]); }}>Clear upload</button></div>}
   </section>;

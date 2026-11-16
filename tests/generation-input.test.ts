@@ -10,6 +10,8 @@ test("required inputs and existing-only dependency are enforced", () => {
   assert.deepEqual(checkCriteria(criteria(), counts).errors, []);
   assert.ok(checkCriteria(defaultCriteria("2025-10-29"), { pilots: 0, vehicles: 0, locations: 0, customers: 0, existing: 0 }).errors.length >= 7);
   assert.ok(checkCriteria({ ...criteria(), onlyExistingResources: true }, counts).errors.some((error) => error.includes("existing")));
+  assert.deepEqual(checkCriteria({ ...criteria(), onlyExistingResources: true }, { ...counts, pilots: 0, vehicles: 0, existing: 2 }).errors, []);
+  assert.ok(checkCriteria(criteria(), { ...counts, pilots: 0, vehicles: 0 }).errors.length >= 2);
 });
 test("period ordering, positive amounts, and integer fare limits are enforced", () => {
   for (const bad of [{ fromDate: "2025-11-01" }, { minimumFare: "50.5" }, { averagePricePerKm: "0" }, { maximumFare: "10" }, { toDate: "2025-02-30" }]) assert.ok(checkCriteria({ ...criteria(), ...bad }, counts).errors.length > 0);
@@ -66,9 +68,11 @@ test("user registration dates are required; optional contacts remain text", () =
   assert.deepEqual(result.errors, []); assert.equal(result.rows[0].phone, "001234");
   assert.ok(parseCsv("customers", "customer_id,name,registered_at\nC1,Sample,invalid").errors.length > 0);
 });
-test("existing rides need a driver identity and valid start/end timestamps", () => {
-  assert.ok(parseCsv("existing", "ride_id,registration,customer_id,start_at,end_at\nE1,V1,C1,2025-10-29T20:00,2025-10-29T21:00").errors.length > 0);
+test("existing rides require only request timestamp and vehicle; older columns remain supported", () => {
+  assert.equal(parseCsv("existing", "request_made_at,vehicle_no\n2025-10-29T20:00,V1").rows.length, 1);
+  assert.equal(parseCsv("existing", "ride_id,registration,customer_id,start_at,end_at\nE1,V1,C1,2025-10-29T20:00,2025-10-29T21:00").rows.length, 1);
   assert.equal(parseCsv("existing", "ride_id,registration,customer_id,start_at,end_at,pilot_name\nE1,V1,C1,2025-10-29T20:00,2025-10-29T21:00,Sample Driver").rows.length, 1);
+  for (const csv of ["request_made_at\n2025-10-29T20:00", "request_made_at,vehicle_no\ninvalid,V1", "request_made_at,vehicle_no,end_at\n2025-10-29T20:00,V1,2025-10-29T19:00"]) assert.ok(parseCsv("existing", csv).errors.length);
 });
 test("unsupported, empty, and oversized files are rejected", () => {
   assert.equal(validateFile("file.CSV", 1), null);

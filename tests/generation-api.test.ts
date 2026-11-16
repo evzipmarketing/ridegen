@@ -24,6 +24,23 @@ test("generation API bounds request-body size before parsing", async () => {
   const oversized = new Request("http://localhost:3000/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ padding: "x".repeat(32 * 1024 * 1024) }) });
   assert.equal((await POST(oversized)).status, 413);
 });
+
+test("existing-only API accepts users, routes, and existing rides without driver/vehicle datasets", async () => {
+  const data = {
+    locations: [{ pickup: "A", drop: "B", distance_km: "5" }],
+    customers: [{ customer_id: "U1", name: "User", registered_at: "2025-10-01" }],
+    existing: [
+      { start_at: "2025-10-29T20:00", registration: "V1", pilot_name: "Driver One", distance_km: "5" },
+      { start_at: "2025-10-29T23:00", registration: "V1", pilot_name: "Driver One", distance_km: "5" },
+    ],
+  };
+  const criteria = { ...defaultCriteria("2025-10-29"), targetRevenue: "100", averagePricePerKm: "20", minimumFare: "50", maximumFare: "500", onlyExistingResources: true };
+  const response = await POST(request({ criteria, data }));
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.ok(result.rides.length);
+  assert.ok(result.rides.every((ride: { driver_name: string; vehicle_number: string }) => ride.driver_name === "Driver One" && ride.vehicle_number === "V1"));
+});
 test("origin checks use the public Host rather than Next.js internal URL host", async () => {
   const forwarded = new Request("http://localhost:3000/api/generate", { method: "POST", headers: { "Content-Type": "application/json", Host: "127.0.0.1:3000", Origin: "http://127.0.0.1:3000" }, body: "null" });
   assert.equal((await POST(forwarded)).status, 400);

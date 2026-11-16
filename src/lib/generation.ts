@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { criteriaSchema, toMinorUnits, type RideCriteria } from "./generation-criteria";
 import { DATASET_KINDS, datasetDefinitions, resourceKey, validRouteDistance, validateTable, type DataRow, type ReferenceData } from "./uploads";
 import { DAY_MS, idleWindow, localDate, localTimestamp, stableHash, timestamp } from "./ride-time";
+import { deriveExistingPilots, existingDailyPairings, existingDriverId, resolveExistingBookings } from "./existing-rides";
 
 export const GENERATOR_VERSION = "idle-windows-v1";
 export const RULES = { currency: "INR", gstPercent: 5, monthlyWorkingDays: 26, weeklyDaysOff: 1, minimumSpeed: 10, maximumSpeed: 80, maximumFareRepeats: 3, minimumGapSeconds: 241, maximumGapSeconds: 299, maximumRides: 5000 } as const;
@@ -75,19 +76,24 @@ function recordWork(id: string, start: number, end: number, work: Map<string, Se
   }
 }
 
-export function canonicalData(input: unknown): ReferenceData {
+export function canonicalData(input: unknown, onlyExistingResources = false): ReferenceData {
   if (!input || typeof input !== "object") throw new GenerationInputError("Reference uploads are missing.");
   const output = {} as ReferenceData;
   for (const kind of DATASET_KINDS) {
-    const rows = (input as Record<string, unknown>)[kind];
+    const rows = (input as Record<string, unknown>)[kind] ?? (onlyExistingResources && (kind === "pilots" || kind === "vehicles") ? [] : undefined);
     if (!Array.isArray(rows)) throw new GenerationInputError(`Invalid ${kind} dataset.`);
-    if (!rows.length) { if (kind !== "existing") throw new GenerationInputError(`Upload ${datasetDefinitions[kind].title}.`); output[kind] = []; continue; }
+    if (!rows.length) { if (kind !== "existing" && !(onlyExistingResources && (kind === "pilots" || kind === "vehicles"))) throw new GenerationInputError(`Upload ${datasetDefinitions[kind].title}.`); output[kind] = []; continue; }
     const columns: string[] = [...datasetDefinitions[kind].columns, ...datasetDefinitions[kind].optionalColumns];
     if (rows.some((row) => !row || typeof row !== "object" || Array.isArray(row) || Object.values(row).some((value) => typeof value !== "string"))) throw new GenerationInputError(`Invalid ${kind} records.`);
     const result = validateTable(kind, [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ""))]);
     if (result.errors.length) throw new GenerationInputError(`${kind}: ${result.errors.slice(0, 5).join(" ")}`);
     output[kind] = result.rows;
   }
+  if (onlyExistingResources) {
+    const derived = deriveExistingPilots(output.existing).filter((pilot) => !output.pilots.some((uploaded) => resourceKey(uploaded.pilot_id) === resourceKey(pilot.pilot_id) || resourceKey(uploaded.name) === resourceKey(pilot.name)));
+    output.pilots = [...output.pilots, ...derived];
+  }
+  output.existing = resolveExistingBookings(output);
   return output;
 }
 
@@ -106,7 +112,7 @@ export function eligibleRoutes(rows: DataRow[]): DataRow[] {
 export function generateRides(rawCriteria: unknown, rawData: unknown, options: { seed?: string; batchId?: string } = {}): GenerationResult {
   const parsed = criteriaSchema.safeParse(rawCriteria);
   if (!parsed.success) throw new GenerationInputError(parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join(" "));
-  const criteria = parsed.data, data = canonicalData(rawData);
+  const criteria = parsed.data, data = canonicalData(rawData, parsed.data.onlyExistingResources);
   if (criteria.onlyExistingResources && !data.existing.length) throw new GenerationInputError("The existing-only option requires existing rides.");
   const seed = options.seed ?? randomBytes(24).toString("hex"), random = randomSource(seed);
   const integer = (min: number, max: number) => min + Math.floor(random() * (max - min + 1));
@@ -115,7 +121,7 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
   const work = new Map<string, Set<string>>(), existingPilots = new Set<string>(), existingVehicles = new Set<string>();
   const existingDates = new Map<string, Set<string>>();
   const existingForVehicle = new Map<string, Booking[]>();
-  const resolvePilot = (row: DataRow) => data.pilots.find((pilot) => (row.pilot_id && resourceKey(pilot.pilot_id) === resourceKey(row.pilot_id)) || (row.pilot_name && resourceKey(pilot.name) === resourceKey(row.pilot_name)))?.pilot_id ?? row.pilot_id ?? `unmatched:${row.pilot_name}`;
+  const resolvePilot = (row: DataRow) => existingDriverId(data, row);
   for (const row of data.existing) {
     const start = timestamp(row.start_at), end = timestamp(row.end_at), id = resolvePilot(row);
     const byId = data.pilots.find((pilot) => row.pilot_id && resourceKey(pilot.pilot_id) === resourceKey(row.pilot_id));
@@ -124,14 +130,18 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
     const vehicle = resourceKey(row.registration);
     insert(vehicleBookings, vehicle, { start, end, gap: 300000 });
     insert(existingForVehicle, vehicle, { start, end, gap: 300000 });
-    insert(pilotBookings, resourceKey(id), { start, end, gap: 0 });
-    insert(userBookings, resourceKey(row.customer_id), { start, end, gap: 0 });
-    existingPilots.add(resourceKey(id)); existingVehicles.add(vehicle);
-    recordWork(id, start, end, work);
-    const dates = existingDates.get(id) ?? new Set<string>(); for (const date of coveredDates(start, end)) dates.add(date); existingDates.set(id, dates);
+    if (row.customer_id) insert(userBookings, resourceKey(row.customer_id), { start, end, gap: 0 });
+    existingVehicles.add(vehicle);
+    if (id) {
+      insert(pilotBookings, resourceKey(id), { start, end, gap: 0 });
+      existingPilots.add(resourceKey(id));
+      recordWork(id, start, end, work);
+      const dates = existingDates.get(id) ?? new Set<string>(); for (const date of coveredDates(start, end)) dates.add(date); existingDates.set(id, dates);
+    }
   }
   const pilots = data.pilots.filter((pilot) => !criteria.onlyExistingResources || existingPilots.has(resourceKey(pilot.pilot_id)));
-  if (!pilots.length) throw new GenerationInputError("No uploaded drivers match the existing rides. Check pilot_id/pilot_name.");
+  const pairings = existingDailyPairings(data);
+  if (!pilots.length) throw new GenerationInputError("No uploaded drivers match the existing rides. Add driver_name or driver_id to existing rides, or uncheck the existing-resources-only option.");
   const eligible = eligibleRoutes(data.locations);
   if (!eligible.length) throw new GenerationInputError("No eligible pickup/drop routes remain. Routes need valid distances of 1-2000 km (up to six decimal places), different pickup/drop locations, and no repeated eligible route ID or pickup/drop pair.");
   const routes = eligible.map((route) => ({ route, fare: fareForDistance(route.distance_km, criteria.averagePricePerKm, criteria.minimumFare) })).filter(({ fare }) => fare <= Number(criteria.maximumFare));
@@ -140,6 +150,19 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
   const contribution = (fare: number) => criteria.revenueBasis === "gross" ? fare * 100 : gstSplit(fare).netPaise;
   if (routes.every(({ fare }) => contribution(fare) > targetPaise + 100)) throw new GenerationInputError("The target is smaller than any eligible single ride.");
   const windows: Slot[] = [];
+  if (criteria.onlyExistingResources && !data.vehicles.length) {
+    const from = timestamp(criteria.fromDate), until = timestamp(criteria.toDate) + DAY_MS;
+    for (const [registration, actual] of existingForVehicle) {
+      for (let index = 1; index < actual.length; index++) {
+        const start = Math.max(from, actual[index - 1].end + 300000), end = Math.min(until, actual[index].start - 300000);
+        for (let cursor = start; cursor < end;) {
+          const dayEnd = timestamp(localDate(cursor)) + DAY_MS, segmentEnd = Math.min(end, dayEnd);
+          if (pilots.some((pilot) => pairings.canUse(pilot.pilot_id, registration, cursor, segmentEnd))) windows.push({ start: cursor, end: segmentEnd, cursor, vehicle: { registration: data.existing.find((row) => resourceKey(row.registration) === registration)!.registration, make: "", idle_date: localDate(cursor) } });
+          cursor = segmentEnd;
+        }
+      }
+    }
+  }
   for (const vehicle of data.vehicles) {
     if (vehicle.idle_date < criteria.fromDate || vehicle.idle_date > criteria.toDate) continue;
     const key = resourceKey(vehicle.registration);
@@ -152,7 +175,7 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
     }
     for (const segment of segments) windows.push({ ...segment, cursor: segment.start, vehicle });
   }
-  if (!windows.length) throw new GenerationInputError("No eligible dated idle windows or between-existing-ride gaps match the selected period/resources.");
+  if (!windows.length) throw new GenerationInputError("No eligible idle windows or bounded gaps match the selected dates and consistent same-day driver/vehicle assignments.");
   const averageFare = routes.reduce((sum, row) => sum + contribution(row.fare), 0) / routes.length;
   const ridesPerWindow = Math.max(1, targetPaise / averageFare / windows.length);
   for (const window of windows) {
@@ -185,7 +208,7 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
     let pilot: DataRow | undefined;
     for (let scan = 0; scan < pilots.length; scan++) {
       const candidate = pilots[(pilotStart + scan) % pilots.length];
-      if (pilotCanWork(candidate.pilot_id, request, end, seed, work, existingDates) && !conflict(pilotBookings.get(resourceKey(candidate.pilot_id)) ?? [], request, end, 0)) { pilot = candidate; break; }
+      if ((!criteria.onlyExistingResources || pairings.canUse(candidate.pilot_id, window.vehicle.registration, request, end)) && pilotCanWork(candidate.pilot_id, request, end, seed, work, existingDates) && !conflict(pilotBookings.get(resourceKey(candidate.pilot_id)) ?? [], request, end, 0)) { pilot = candidate; break; }
     }
     const userStart = integer(0, data.customers.length - 1);
     let user: DataRow | undefined;
@@ -218,6 +241,12 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
   if (routes.length < eligible.length) warnings.push("Routes priced above the maximum fare were excluded rather than changing their distances or undercharging them.");
   if (attempts >= 60000 || rides.length >= RULES.maximumRides) warnings.push("The generation safety limit was reached; reduce the period or target and generate separate batches.");
   warnings.push("Distances come from your uploaded route file. No road-routing verification was performed.");
+  const estimated = data.existing.filter((row) => row.end_time_source === "estimated_20_kmh").length;
+  const blocked = data.existing.filter((row) => row.end_time_source === "blocked_idle_window").length;
+  if (criteria.onlyExistingResources && !data.vehicles.length) warnings.push("No vehicle idle file supplied: only bounded gaps between existing rides within the selected dates were used. Vehicle make is left blank.");
+  if (criteria.onlyExistingResources && pairings.hasConflicts) warnings.push("Conflicting same-day driver/vehicle pairings were found in existing rides. Affected gaps were excluded to prevent driver or vehicle swaps.");
+  if (estimated) warnings.push(`${estimated} existing ride end times estimated from distance at 20 km/h; these are not verified completion times.`);
+  if (blocked) warnings.push(`${blocked} existing rides have no usable distance/end time; the remainder of their relevant idle windows is blocked (through day-end when no window matches).`);
   const pilotCalendar = pilots.map((pilot) => {
     const offDates = new Set<string>();
     for (let day = timestamp(criteria.fromDate); day <= timestamp(criteria.toDate) + DAY_MS; day += DAY_MS) { const date = localDate(day), off = pilotDayOff(pilot.pilot_id, date, seed, existingDates.get(pilot.pilot_id)); if (off) offDates.add(off); }
@@ -236,6 +265,9 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
 }
 
 export function validateGeneratedRides(result: GenerationResult, data: ReferenceData): string[] {
+  if (result.metadata.criteria.onlyExistingResources && !data.pilots.length) data = { ...data, pilots: deriveExistingPilots(data.existing) };
+  data = { ...data, existing: resolveExistingBookings(data) };
+  const pairings = existingDailyPairings(data);
   const routes = new Map(eligibleRoutes(data.locations).map((route) => [route.route_id, route]));
   const errors: string[] = [], fares = new Map<number, number>(), ids = new Set<string>();
   const existingDates = new Map<string, Set<string>>();
@@ -251,7 +283,8 @@ export function validateGeneratedRides(result: GenerationResult, data: Reference
     if (ids.has(ride.ride_id) || !ride.synthetic || ride.data_type !== "SYNTHETIC" || ride.batch_id !== result.batchId) errors.push("Missing synthetic marker or duplicate ride identifier.");
     ids.add(ride.ride_id);
     const idle = data.vehicles.find((row) => resourceKey(row.registration) === resourceKey(ride.vehicle_number) && row.idle_date === ride.idle_date && request >= idleWindow(row.idle_date, row.idle_start, row.idle_end).start && end <= idleWindow(row.idle_date, row.idle_start, row.idle_end).end);
-    if (!idle || ride.idle_date < criteria.fromDate || ride.idle_date > criteria.toDate) errors.push("Ride outside selected vehicle idle windows.");
+    const gapOnly = criteria.onlyExistingResources && !data.vehicles.length;
+    if ((!gapOnly && !idle) || ride.idle_date < criteria.fromDate || ride.idle_date > criteria.toDate || (gapOnly && (ride.idle_date !== localDate(request) || end > timestamp(criteria.toDate) + DAY_MS))) errors.push("Ride outside selected vehicle idle windows.");
     const user = data.customers.find((row) => row.customer_id === ride.customer_id), pilot = data.pilots.find((row) => row.pilot_id === ride.pilot_id), route = routes.get(ride.route_id);
     if (!user || user.name !== ride.user_name || request <= timestamp(user.registered_at)) errors.push("User missing, mismatched, or not yet registered.");
     if (!pilot || pilot.name !== ride.driver_name || !pilotCanWork(ride.pilot_id, request, end, result.metadata.seed, new Map(), existingDates)) errors.push("Driver missing, mismatched, or on weekly rest.");
@@ -265,11 +298,12 @@ export function validateGeneratedRides(result: GenerationResult, data: Reference
     for (const [type, key] of [["vehicle", resourceKey(ride.vehicle_number)], ["pilot", resourceKey(ride.pilot_id)], ["user", resourceKey(ride.customer_id)]] as const) { const list = groups[type].get(key) ?? []; list.push({ ride, start: request, end }); groups[type].set(key, list); }
     for (const existing of data.existing) {
       const sameVehicle = resourceKey(existing.registration) === resourceKey(ride.vehicle_number);
-      const matches = sameVehicle || resourceKey(existing.customer_id) === resourceKey(ride.customer_id) || (existing.pilot_id && resourceKey(existing.pilot_id) === resourceKey(ride.pilot_id)) || (existing.pilot_name && resourceKey(existing.pilot_name) === resourceKey(ride.driver_name));
+      const matches = sameVehicle || (existing.customer_id && resourceKey(existing.customer_id) === resourceKey(ride.customer_id)) || (existing.pilot_id && resourceKey(existing.pilot_id) === resourceKey(ride.pilot_id)) || (existing.pilot_name && resourceKey(existing.pilot_name) === resourceKey(ride.driver_name));
       if (matches && request < timestamp(existing.end_at) && end > timestamp(existing.start_at)) errors.push("Overlap with an existing ride.");
       if (sameVehicle && request < timestamp(existing.end_at) + 300000 && end + ride.vehicle_turnaround_seconds * 1000 > timestamp(existing.start_at)) errors.push("Vehicle turnaround violated next to an existing ride.");
     }
     if (criteria.onlyExistingResources) {
+      if (!pairings.canUse(ride.pilot_id, ride.vehicle_number, request, end)) errors.push("Same-day driver/vehicle pairing mismatch or conflict.");
       const actual = data.existing.filter((row) => resourceKey(row.registration) === resourceKey(ride.vehicle_number)).sort((a, b) => timestamp(a.start_at) - timestamp(b.start_at));
       if (!actual.slice(1).some((next, index) => request >= timestamp(actual[index].end_at) + 300000 && end <= timestamp(next.start_at) - 300000)) errors.push("Ride outside a bounded gap between existing rides.");
       if (!data.existing.some((row) => (row.pilot_id && resourceKey(row.pilot_id) === resourceKey(ride.pilot_id)) || (row.pilot_name && resourceKey(row.pilot_name) === resourceKey(ride.driver_name)))) errors.push("Driver not in existing data.");

@@ -11,7 +11,7 @@ export const datasetDefinitions = {
   vehicles: { title: "Vehicle idle windows", columns: ["idle_date", "registration", "make", "idle_start", "idle_end"], optionalColumns: ["vehicle_id"], key: "registration" },
   locations: { title: "Pickup / drop routes", columns: ["pickup", "drop", "distance_km"], optionalColumns: ["route_id", "distance_source"], key: "route_id" },
   customers: { title: "Users / customers", columns: ["customer_id", "name", "registered_at"], optionalColumns: ["phone", "email"], key: "customer_id" },
-  existing: { title: "Existing rides (optional)", columns: ["ride_id", "registration", "customer_id", "start_at", "end_at"], optionalColumns: ["pilot_id", "pilot_name"], key: "ride_id" }
+  existing: { title: "Existing rides (optional)", columns: ["start_at", "registration"], optionalColumns: ["ride_id", "customer_id", "name", "pilot_id", "pilot_name", "pickup", "drop", "distance_km", "net_fare", "end_at", "end_time_source"], key: "ride_id" }
 } as const;
 export function isDatasetKind(value: string): value is DatasetKind { return DATASET_KINDS.some((kind) => kind === value); }
 export function resourceKey(value: string): string { return value.trim().toLowerCase().replace(/\s+/g, ""); }
@@ -21,6 +21,8 @@ export function validRouteDistance(value: string): boolean {
 function normalizeHeader(value: unknown, kind: DatasetKind): string {
   const header = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (header === "date_registered") return "registered_at";
+  const existingAliases: Record<string, string> = { request_made_at: "start_at", vehicle_no: "registration", pickup_address: "pickup", drop_address: "drop", distance_covered: "distance_km" };
+  if (kind === "existing" && Object.hasOwn(existingAliases, header)) return existingAliases[header];
   const aliases: Record<string, string> = { id: datasetDefinitions[kind].key, driver_id: "pilot_id", vehicle_number: "registration", idle_vehicle_number: "registration", registration_number: "registration", vehicle_make: "make", idle_vehicle_make: "make", idle_timings_start: "idle_start", idle_timings_end: "idle_end", idle_start_time: "idle_start", idle_end_time: "idle_end", pickup_location: "pickup", drop_location: "drop", distance: "distance_km", user_id: "customer_id", user_name: "name", customer_name: "name", full_name: "name", registered_date: "registered_at", registration_date: "registered_at", registered_dates: "registered_at", registered_on: "registered_at", phone_number: "phone", mobile: "phone", email_address: "email", start_time: "start_at", end_time: "end_at" };
   if (header === "driver_name" || header === "pilot_name") return kind === "existing" ? "pilot_name" : "name";
   return Object.hasOwn(aliases, header) ? aliases[header] : header;
@@ -53,7 +55,7 @@ export function validateTable(kind: DatasetKind, table: unknown[][]): ImportResu
     const report = (message: string) => errors.push(`Record ${index + 1}: ${message}`);
     for (const column of required) if (!row[column] && !(kind === "locations" && column === "distance_km")) report(`${column} is required.`);
     for (const [column, value] of Object.entries(row)) {
-      const limit = kind === "locations" && (column === "pickup" || column === "drop") ? 2000 : column === "email" ? 254 : 200;
+      const limit = (kind === "locations" || kind === "existing") && (column === "pickup" || column === "drop") ? 2000 : column === "email" ? 254 : 200;
       if (value.length > limit) report(`${column} is too long.`);
     }
     if (kind === "pilots") {
@@ -78,9 +80,11 @@ export function validateTable(kind: DatasetKind, table: unknown[][]): ImportResu
       if (row.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email)) report("email is invalid.");
     }
     if (kind === "existing") {
-      if (!row.pilot_id && !row.pilot_name) report("Include pilot_id or pilot_name to identify the driver.");
-      if (!Number.isFinite(timestamp(row.start_at)) || !Number.isFinite(timestamp(row.end_at)) || timestamp(row.end_at) <= timestamp(row.start_at)) report("start_at/end_at must be valid timestamps with end after start.");
-      if (timestamp(row.end_at) - timestamp(row.start_at) > 366 * 86400000) report("An existing booking cannot span more than 366 days.");
+      row.ride_id ||= `EX-${index + 1}-${stableHash(`${resourceKey(row.registration)}|${row.start_at}`).toString(16)}`;
+      if (!Number.isFinite(timestamp(row.start_at))) report("request_made_at must be a valid date or ISO timestamp; timezone-free values use IST.");
+      if (row.end_at && (!Number.isFinite(timestamp(row.end_at)) || timestamp(row.end_at) <= timestamp(row.start_at))) report("end_at must be a valid timestamp after request_made_at.");
+      if (row.end_at && timestamp(row.end_at) - timestamp(row.start_at) > 366 * 86400000) report("An existing booking cannot span more than 366 days.");
+      if (row.distance_km && (!Number.isFinite(Number(row.distance_km)) || Number(row.distance_km) < 0 || Number(row.distance_km) > 2000)) report("distance_covered must be a number between 0 and 2000 km when supplied.");
     }
     let key = resourceKey(row[definition.key]);
     if (kind === "vehicles") key = `${resourceKey(row.registration)}|${row.idle_date}|${row.idle_start}|${row.idle_end}`;

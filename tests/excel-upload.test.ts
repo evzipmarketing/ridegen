@@ -17,7 +17,7 @@ const datasets: [DatasetKind, unknown[][]][] = [
   ["locations", [["pickup", "drop", "distance_km"], ["A", "B", 2.125]]],
   ["customers", [["user_ID", "user_name", "date_registered"], ["001", "User", "2025-10-01"]]],
   ["vehicles", [["idle_date", "registration", "make", "idle_start", "idle_end"], ["2025-10-29", "TG08T5465", "Make", "20:00", "05:00"]]],
-  ["existing", [["ride_id", "registration", "customer_id", "start_at", "end_at", "pilot_name"], ["E1", "TG08T5465", "001", "2025-10-29T20:00", "2025-10-29T21:00", "Sample Driver"]]],
+  ["existing", [["request_made_at", "vehicle_no", "user_id", "user_name", "driver_name", "pickup_address", "drop_address", "distance_covered", "net_fare"], ["2025-10-29T20:00", "TG08T5465", "001", "Sample User", "Sample Driver", "A", "B", 5.125, 95.24]]],
 ];
 
 for (const format of ["xls", "xlsx"] as const) {
@@ -28,6 +28,7 @@ for (const format of ["xls", "xlsx"] as const) {
       assert.equal(result.rows.length, 1);
       if (kind === "customers") assert.equal(result.rows[0].customer_id, "001");
       if (kind === "locations") assert.equal(result.rows[0].distance_km, "2.125");
+      if (kind === "existing") { assert.equal(result.rows[0].distance_km, "5.125"); assert.equal(result.rows[0].net_fare, "95.24"); }
     }
   });
   test(`${format} converts real Excel date/time cells without shifting IST wall-clock values`, async () => {

@@ -18,7 +18,10 @@ export function toMinorUnits(value: string): number { const [whole, fraction = "
 export function checkCriteria(input: CriteriaInput, counts: { pilots: number; vehicles: number; locations: number; customers: number; existing: number }) {
   const result = criteriaSchema.safeParse(input);
   const errors = result.success ? [] : result.error.issues.map((issue) => `${issue.path.join(" ").replace(/([A-Z])/g, " $1").toLowerCase()}: ${issue.message}`);
-  for (const [key, label] of [["pilots", "driver names"], ["vehicles", "dated vehicle idle windows"], ["locations", "pickup/drop routes with distances"], ["customers", "users with IDs and registration dates"]] as const) if (!counts[key]) errors.push(`Upload ${label}.`);
+  for (const [key, label] of [["pilots", "driver names"], ["vehicles", "dated vehicle idle windows"], ["locations", "pickup/drop routes with distances"], ["customers", "users with IDs and registration dates"]] as const) {
+    if (input.onlyExistingResources && (key === "pilots" || key === "vehicles")) continue;
+    if (!counts[key]) errors.push(`Upload ${label}.`);
+  }
   if (input.onlyExistingResources && !counts.existing) errors.push("Upload existing rides before selecting the existing-resources-only option.");
   return { errors, warnings: ["Idle dates select window start dates; overnight windows finish the following morning.", "26 working days per calendar month is a target/cap, with one day off per week. Limited idle dates can prevent reaching the target.", "Fare is rounded from distance x price/km, with the minimum-fare floor and maximum limit. Routes are randomized; no fare is used more than three times. These constraints can make revenue targets unreachable."] };
 }

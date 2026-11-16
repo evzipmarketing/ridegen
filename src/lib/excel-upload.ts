@@ -29,7 +29,7 @@ export function parseExcel(kind: DatasetKind, source: ArrayBuffer): ImportResult
       } else {
         // Keep formatted identifiers (including leading zeros), but do not round numeric distances.
         const header = String(table[0]?.[col] ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-        cells.push(cell.t === "n" && ["distance", "distance_km"].includes(header) ? String(cell.v) : XLSX.utils.format_cell(cell));
+        cells.push(cell.t === "n" && ["distance", "distance_km", "distance_covered", "net_fare"].includes(header) ? String(cell.v) : XLSX.utils.format_cell(cell));
       }
     }
     table.push(cells);
