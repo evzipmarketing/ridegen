@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { criteriaSchema, toMinorUnits, type RideCriteria } from "./generation-criteria";
-import { DATASET_KINDS, datasetDefinitions, resourceKey, validateTable, type DataRow, type ReferenceData } from "./uploads";
+import { DATASET_KINDS, datasetDefinitions, resourceKey, validRouteDistance, validateTable, type DataRow, type ReferenceData } from "./uploads";
 import { DAY_MS, idleWindow, localDate, localTimestamp, stableHash, timestamp } from "./ride-time";
 
 export const GENERATOR_VERSION = "idle-windows-v1";
@@ -80,7 +80,7 @@ export function canonicalData(input: unknown): ReferenceData {
   const output = {} as ReferenceData;
   for (const kind of DATASET_KINDS) {
     const rows = (input as Record<string, unknown>)[kind];
-    if (!Array.isArray(rows) || rows.length > 10000) throw new GenerationInputError(`Invalid ${kind} dataset.`);
+    if (!Array.isArray(rows)) throw new GenerationInputError(`Invalid ${kind} dataset.`);
     if (!rows.length) { if (kind !== "existing") throw new GenerationInputError(`Upload ${datasetDefinitions[kind].title}.`); output[kind] = []; continue; }
     const columns: string[] = [...datasetDefinitions[kind].columns, ...datasetDefinitions[kind].optionalColumns];
     if (rows.some((row) => !row || typeof row !== "object" || Array.isArray(row) || Object.values(row).some((value) => typeof value !== "string"))) throw new GenerationInputError(`Invalid ${kind} records.`);
@@ -89,6 +89,18 @@ export function canonicalData(input: unknown): ReferenceData {
     output[kind] = result.rows;
   }
   return output;
+}
+
+export function eligibleRoutes(rows: DataRow[]): DataRow[] {
+  const ids = new Set<string>(), pairs = new Set<string>();
+  return rows.filter((row) => {
+    const pickup = resourceKey(row.pickup), drop = resourceKey(row.drop);
+    if (pickup === drop || !validRouteDistance(row.distance_km) || Number(row.distance_km) < 1) return false;
+    const id = resourceKey(row.route_id), pair = JSON.stringify([pickup, drop]);
+    if (ids.has(id) || pairs.has(pair)) return false;
+    ids.add(id); pairs.add(pair);
+    return true;
+  });
 }
 
 export function generateRides(rawCriteria: unknown, rawData: unknown, options: { seed?: string; batchId?: string } = {}): GenerationResult {
@@ -120,7 +132,9 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
   }
   const pilots = data.pilots.filter((pilot) => !criteria.onlyExistingResources || existingPilots.has(resourceKey(pilot.pilot_id)));
   if (!pilots.length) throw new GenerationInputError("No uploaded drivers match the existing rides. Check pilot_id/pilot_name.");
-  const routes = data.locations.map((route) => ({ route, fare: fareForDistance(route.distance_km, criteria.averagePricePerKm, criteria.minimumFare) })).filter(({ fare }) => fare <= Number(criteria.maximumFare));
+  const eligible = eligibleRoutes(data.locations);
+  if (!eligible.length) throw new GenerationInputError("No eligible pickup/drop routes remain. Routes need valid distances of 1-2000 km (up to six decimal places), different pickup/drop locations, and no repeated eligible route ID or pickup/drop pair.");
+  const routes = eligible.map((route) => ({ route, fare: fareForDistance(route.distance_km, criteria.averagePricePerKm, criteria.minimumFare) })).filter(({ fare }) => fare <= Number(criteria.maximumFare));
   if (!routes.length) throw new GenerationInputError("No uploaded route can meet the price/km, minimum fare, and maximum fare together.");
   const targetPaise = toMinorUnits(criteria.targetRevenue);
   const contribution = (fare: number) => criteria.revenueBasis === "gross" ? fare * 100 : gstSplit(fare).netPaise;
@@ -200,7 +214,8 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
   const differencePaise = selectedRevenue() - targetPaise;
   const status = rides.length > 0 && Math.abs(differencePaise) <= 100 ? "complete" : "partial";
   if (status === "partial") warnings.push("Target not reached within INR 1 rounding tolerance. Idle capacity, driver rest, user availability, route fares, and the three-use fare cap can limit output. The bounded algorithm does not prove that no other solution exists.");
-  if (routes.length < data.locations.length) warnings.push("Routes priced above the maximum fare were excluded rather than changing their distances or undercharging them.");
+  if (eligible.length < data.locations.length) warnings.push(`${data.locations.length - eligible.length} uploaded routes skipped: matching pickup/drop locations, missing/invalid distances, distances below 1 km, or duplicate route IDs/pickup-drop pairs. The first eligible duplicate is used.`);
+  if (routes.length < eligible.length) warnings.push("Routes priced above the maximum fare were excluded rather than changing their distances or undercharging them.");
   if (attempts >= 60000 || rides.length >= RULES.maximumRides) warnings.push("The generation safety limit was reached; reduce the period or target and generate separate batches.");
   warnings.push("Distances come from your uploaded route file. No road-routing verification was performed.");
   const pilotCalendar = pilots.map((pilot) => {
@@ -221,6 +236,7 @@ export function generateRides(rawCriteria: unknown, rawData: unknown, options: {
 }
 
 export function validateGeneratedRides(result: GenerationResult, data: ReferenceData): string[] {
+  const routes = new Map(eligibleRoutes(data.locations).map((route) => [route.route_id, route]));
   const errors: string[] = [], fares = new Map<number, number>(), ids = new Set<string>();
   const existingDates = new Map<string, Set<string>>();
   for (const row of data.existing) {
@@ -236,7 +252,7 @@ export function validateGeneratedRides(result: GenerationResult, data: Reference
     ids.add(ride.ride_id);
     const idle = data.vehicles.find((row) => resourceKey(row.registration) === resourceKey(ride.vehicle_number) && row.idle_date === ride.idle_date && request >= idleWindow(row.idle_date, row.idle_start, row.idle_end).start && end <= idleWindow(row.idle_date, row.idle_start, row.idle_end).end);
     if (!idle || ride.idle_date < criteria.fromDate || ride.idle_date > criteria.toDate) errors.push("Ride outside selected vehicle idle windows.");
-    const user = data.customers.find((row) => row.customer_id === ride.customer_id), pilot = data.pilots.find((row) => row.pilot_id === ride.pilot_id), route = data.locations.find((row) => row.route_id === ride.route_id);
+    const user = data.customers.find((row) => row.customer_id === ride.customer_id), pilot = data.pilots.find((row) => row.pilot_id === ride.pilot_id), route = routes.get(ride.route_id);
     if (!user || user.name !== ride.user_name || request <= timestamp(user.registered_at)) errors.push("User missing, mismatched, or not yet registered.");
     if (!pilot || pilot.name !== ride.driver_name || !pilotCanWork(ride.pilot_id, request, end, result.metadata.seed, new Map(), existingDates)) errors.push("Driver missing, mismatched, or on weekly rest.");
     if (!route || route.pickup !== ride.pickup || route.drop !== ride.drop || Number(route.distance_km) !== ride.distance_km || route.distance_source !== ride.distance_source) errors.push("Route or distance mismatch.");

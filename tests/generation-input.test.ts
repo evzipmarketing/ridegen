@@ -37,11 +37,30 @@ test("a combined idle_timings column accepts the requested 20:00-5:00 format", (
   const result = parseCsv("vehicles", "idle_date,idle_vehicle_number,idle_vehicle_make,idle_timings\n29/10/2025,TG08T5465,Sample,20:00-5:00");
   assert.deepEqual(result.errors, []); assert.equal(result.rows[0].idle_start, "20:00"); assert.equal(result.rows[0].idle_end, "05:00");
 });
-test("routes require distinct endpoints and positive uploaded distances", () => {
+
+test("identical normalized vehicle windows are deduplicated but conflicting details are rejected", () => {
+  const header = "idle_date,registration,make,idle_start,idle_end\n";
+  const result = parseCsv("vehicles", header + "2026-03-13,TG08T1465,COMET,23:00,06:00\n13/03/2026,TG08T1465 ,COMET,23:00,6:00");
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].idle_end, "06:00");
+  const differentDates = parseCsv("vehicles", header + "2026-03-13,TG08T1465,COMET,23:00,06:00\n2026-03-14,TG08T1465,CITROEN,23:00,06:00");
+  assert.deepEqual(differentDates.errors, []);
+  assert.deepEqual(differentDates.rows.map((row) => row.make), ["COMET", "CITROEN"]);
+  assert.ok(parseCsv("vehicles", header + "2026-03-13,TG08T1465,COMET,23:00,06:00\n2026-03-13,TG08T1465,Other,23:00,06:00").errors.length);
+  assert.ok(parseCsv("vehicles", header + "2026-03-13,TG08T1465,COMET,23:00,06:00\n2026-03-13,TG08T1465,COMET,22:00,05:00").errors.length);
+});
+test("routes retain long addresses, matching endpoints, duplicates, and unusable distances for generation filtering", () => {
   assert.equal(parseCsv("locations", "pickup,drop,distance_km\nA,B,1.5").rows[0].distance_source, "uploaded_distance_estimate");
-  for (const row of ["A,A,1", "A,B,0", "A,B,NaN"]) assert.ok(parseCsv("locations", `pickup,drop,distance_km\n${row}`).errors.length > 0);
+  assert.equal(parseCsv("locations", "pickup,drop,distance_km,route_id\nA,A,1,R1\nA,B,2,R1\nA,B,2,R2\nA,B,0.5,R2").rows.length, 4);
+  for (const row of ["A,B,0", "A,B,NaN", "A,B,"]) assert.equal(parseCsv("locations", `pickup,drop,distance_km\n${row}`).rows.length, 1);
+  const address = "Long address ".repeat(30);
+  assert.equal(parseCsv("locations", `pickup,drop,distance_km\n${address},B,2`).rows[0].pickup, address.trim());
 });
 test("user registration dates are required; optional contacts remain text", () => {
+  const userHeaders = parseCsv("customers", "user_ID,user_name,date_registered\n001,Sample User,2025-10-01");
+  assert.deepEqual(userHeaders.errors, []);
+  assert.deepEqual(userHeaders.rows[0], { customer_id: "001", name: "Sample User", registered_at: "2025-10-01" });
   assert.ok(parseCsv("customers", "customer_id,name\nC1,Sample").errors.length > 0);
   const result = parseCsv("customers", "User ID,User Name,Registered Date,Phone Number,Email\nC1,Sample,2025-10-01,001234,sample@example.invalid");
   assert.deepEqual(result.errors, []); assert.equal(result.rows[0].phone, "001234");
@@ -51,8 +70,9 @@ test("existing rides need a driver identity and valid start/end timestamps", () 
   assert.ok(parseCsv("existing", "ride_id,registration,customer_id,start_at,end_at\nE1,V1,C1,2025-10-29T20:00,2025-10-29T21:00").errors.length > 0);
   assert.equal(parseCsv("existing", "ride_id,registration,customer_id,start_at,end_at,pilot_name\nE1,V1,C1,2025-10-29T20:00,2025-10-29T21:00,Sample Driver").rows.length, 1);
 });
-test("non-CSV, empty, and oversized files are rejected", () => {
+test("unsupported, empty, and oversized files are rejected", () => {
   assert.equal(validateFile("file.CSV", 1), null);
-  assert.ok(validateFile("file.xlsx", 1)); assert.ok(validateFile("file.csv", 0)); assert.ok(validateFile("file.csv", 5 * 1024 * 1024 + 1));
+  assert.equal(validateFile("file.xlsx", 1), null); assert.equal(validateFile("file.XLS", 1), null);
+  assert.ok(validateFile("file.pdf", 1)); assert.ok(validateFile("file.csv", 0)); assert.ok(validateFile("file.csv", 5 * 1024 * 1024 + 1));
   assert.ok(parseCsv("pilots", "name\nOne,Two").errors.length > 0);
 });

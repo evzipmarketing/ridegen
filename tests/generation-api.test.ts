@@ -21,7 +21,7 @@ test("generation API produces a labelled, non-persistent synthetic batch", async
   assert.ok(result.batchId.startsWith("SYN-")); assert.ok(result.metadata.seed); assert.ok(result.rides.every((ride: { synthetic: boolean }) => ride.synthetic));
 });
 test("generation API bounds request-body size before parsing", async () => {
-  const oversized = new Request("http://localhost:3000/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ padding: "x".repeat(8 * 1024 * 1024) }) });
+  const oversized = new Request("http://localhost:3000/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ padding: "x".repeat(32 * 1024 * 1024) }) });
   assert.equal((await POST(oversized)).status, 413);
 });
 test("origin checks use the public Host rather than Next.js internal URL host", async () => {

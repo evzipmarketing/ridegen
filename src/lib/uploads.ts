@@ -1,7 +1,6 @@
 import Papa from "papaparse";
 import { calendarDate, idleWindow, stableHash, timestamp } from "./ride-time";
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
-export const MAX_ROWS = 10000;
 export const DATASET_KINDS = ["pilots", "vehicles", "locations", "customers", "existing"] as const;
 export type DatasetKind = typeof DATASET_KINDS[number];
 export type DataRow = Record<string, string>;
@@ -16,8 +15,12 @@ export const datasetDefinitions = {
 } as const;
 export function isDatasetKind(value: string): value is DatasetKind { return DATASET_KINDS.some((kind) => kind === value); }
 export function resourceKey(value: string): string { return value.trim().toLowerCase().replace(/\s+/g, ""); }
+export function validRouteDistance(value: string): boolean {
+  return /^\d+(?:\.\d{1,6})?$/.test(value) && Number(value) > 0 && Number(value) <= 2000;
+}
 function normalizeHeader(value: unknown, kind: DatasetKind): string {
   const header = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (header === "date_registered") return "registered_at";
   const aliases: Record<string, string> = { id: datasetDefinitions[kind].key, driver_id: "pilot_id", vehicle_number: "registration", idle_vehicle_number: "registration", registration_number: "registration", vehicle_make: "make", idle_vehicle_make: "make", idle_timings_start: "idle_start", idle_timings_end: "idle_end", idle_start_time: "idle_start", idle_end_time: "idle_end", pickup_location: "pickup", drop_location: "drop", distance: "distance_km", user_id: "customer_id", user_name: "name", customer_name: "name", full_name: "name", registered_date: "registered_at", registration_date: "registered_at", registered_dates: "registered_at", registered_on: "registered_at", phone_number: "phone", mobile: "phone", email_address: "email", start_time: "start_at", end_time: "end_at" };
   if (header === "driver_name" || header === "pilot_name") return kind === "existing" ? "pilot_name" : "name";
   return Object.hasOwn(aliases, header) ? aliases[header] : header;
@@ -41,14 +44,18 @@ export function validateTable(kind: DatasetKind, table: unknown[][]): ImportResu
   const named = headers.filter(Boolean);
   if (new Set(named).size !== named.length) return { rows: [], errors: ["Duplicate column headings are not allowed."] };
   const records = body.filter((row) => row.some((cell) => String(cell ?? "").trim()));
-  if (!records.length || records.length > MAX_ROWS) return { rows: [], errors: [`Include between 1 and ${MAX_ROWS} records.`] };
+  if (!records.length) return { rows: [], errors: ["Include at least one record."] };
   const errors: string[] = [], rows: DataRow[] = [];
-  const keys = new Set<string>(), names = new Set<string>(), routeIds = new Set<string>();
+  const keys = new Set<string>(), names = new Set<string>();
+  const vehicleWindows = new Map<string, DataRow>();
   for (const [index, cells] of records.entries()) {
     const row: DataRow = Object.fromEntries(columns.map((column) => [column, String(cells[headers.indexOf(column)] ?? "").trim()]));
     const report = (message: string) => errors.push(`Record ${index + 1}: ${message}`);
-    for (const column of required) if (!row[column]) report(`${column} is required.`);
-    for (const [column, value] of Object.entries(row)) if (value.length > (column === "email" ? 254 : 200)) report(`${column} is too long.`);
+    for (const column of required) if (!row[column] && !(kind === "locations" && column === "distance_km")) report(`${column} is required.`);
+    for (const [column, value] of Object.entries(row)) {
+      const limit = kind === "locations" && (column === "pickup" || column === "drop") ? 2000 : column === "email" ? 254 : 200;
+      if (value.length > limit) report(`${column} is too long.`);
+    }
     if (kind === "pilots") {
       row.pilot_id ||= `P-${stableHash(row.name.toLowerCase()).toString(16)}`;
       const name = resourceKey(row.name);
@@ -64,10 +71,6 @@ export function validateTable(kind: DatasetKind, table: unknown[][]): ImportResu
     }
     if (kind === "locations") {
       row.route_id ||= `R-${stableHash(`${resourceKey(row.pickup)}|${resourceKey(row.drop)}`).toString(16)}`;
-      if (routeIds.has(resourceKey(row.route_id))) report("Duplicate route_id; assign distinct route IDs.");
-      routeIds.add(resourceKey(row.route_id));
-      if (!/^\d+(?:\.\d{1,6})?$/.test(row.distance_km) || Number(row.distance_km) <= 0 || Number(row.distance_km) > 2000) report("distance_km must be positive, no greater than 2000 km, and have at most six decimal places.");
-      if (resourceKey(row.pickup) === resourceKey(row.drop)) report("Pickup and drop must be different.");
       row.distance_source ||= "uploaded_distance_estimate";
     }
     if (kind === "customers") {
@@ -82,17 +85,21 @@ export function validateTable(kind: DatasetKind, table: unknown[][]): ImportResu
     let key = resourceKey(row[definition.key]);
     if (kind === "vehicles") key = `${resourceKey(row.registration)}|${row.idle_date}|${row.idle_start}|${row.idle_end}`;
     if (kind === "locations") key = `${resourceKey(row.pickup)}|${resourceKey(row.drop)}`;
-    if (keys.has(key)) report("Duplicate record or identifier.");
+    if (kind === "vehicles") {
+      const previous = vehicleWindows.get(key);
+      if (previous && previous.make === row.make && resourceKey(previous.vehicle_id) === resourceKey(row.vehicle_id)) continue;
+      vehicleWindows.set(key, row);
+    }
+    if (kind !== "locations" && keys.has(key)) report("Duplicate record or identifier.");
     keys.add(key); rows.push(row);
   }
   if (kind === "vehicles" && !errors.length) {
-    const byVehicle = new Map<string, { start: number; end: number; make: string }[]>();
+    const byVehicle = new Map<string, { start: number; end: number }[]>();
     for (const row of rows) {
       const key = resourceKey(row.registration), windows = byVehicle.get(key) ?? [];
       const window = idleWindow(row.idle_date, row.idle_start, row.idle_end);
-      if (windows.some((item) => item.make !== row.make)) errors.push(`Vehicle ${row.registration} has inconsistent makes.`);
       if (windows.some((item) => window.start < item.end && window.end > item.start)) errors.push(`Vehicle ${row.registration} has overlapping idle windows.`);
-      windows.push({ ...window, make: row.make }); byVehicle.set(key, windows);
+      windows.push(window); byVehicle.set(key, windows);
     }
   }
   return { rows: errors.length ? [] : rows, errors };
@@ -105,8 +112,20 @@ export function parseCsv(kind: DatasetKind, source: string): ImportResult {
   return validateTable(kind, parsed.data);
 }
 export function validateFile(name: string, size: number): string | null {
-  if (!/\.csv$/i.test(name)) return "Choose a CSV (.csv) file. Export Excel sheets as CSV first.";
+  if (!/\.(csv|xlsx?)$/i.test(name)) return "Choose a CSV, XLS, or XLSX file.";
   if (size > MAX_FILE_BYTES) return "Choose a file no larger than 5 MB.";
   if (!size) return "The selected file is empty.";
   return null;
+}
+
+export async function parseUpload(kind: DatasetKind, file: Pick<File, "name" | "size" | "text" | "arrayBuffer">): Promise<ImportResult> {
+  const error = validateFile(file.name, file.size);
+  if (error) return { rows: [], errors: [error] };
+  try {
+    if (/\.csv$/i.test(file.name)) return parseCsv(kind, await file.text());
+    const { parseExcel } = await import("./excel-upload");
+    return parseExcel(kind, await file.arrayBuffer());
+  } catch {
+    return { rows: [], errors: ["Could not read this file. Choose a valid, unencrypted CSV, XLS, or XLSX file."] };
+  }
 }

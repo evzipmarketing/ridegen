@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generateRides, gstSplit, fareForDistance, validateGeneratedRides, pilotDayOff, canonicalData } from "../src/lib/generation";
+import { generateRides, gstSplit, fareForDistance, validateGeneratedRides, pilotDayOff, canonicalData, eligibleRoutes } from "../src/lib/generation";
 import { defaultCriteria } from "../src/lib/generation-criteria";
 import { type ReferenceData } from "../src/lib/uploads";
 import { idleWindow, timestamp, localDate } from "../src/lib/ride-time";
@@ -14,6 +14,43 @@ function fixtures(): ReferenceData {
   };
 }
 const criteria = () => ({ ...defaultCriteria("2025-10-29"), toDate: "2025-10-30", targetRevenue: "500", averagePricePerKm: "20", minimumFare: "50", maximumFare: "500" });
+
+test("generation skips problematic routes without rejecting or changing uploaded rows", () => {
+  const data = fixtures();
+  data.locations = [
+    { route_id: "R1", pickup: "Same", drop: " same ", distance_km: "2" },
+    { route_id: "R2", pickup: "Near", drop: "Nearby", distance_km: "0.999" },
+    { route_id: "R1", pickup: "A", drop: "B", distance_km: "1" },
+    { route_id: "R2", pickup: "C", drop: "D", distance_km: "3" },
+    { route_id: "r1", pickup: "E", drop: "F", distance_km: "4" },
+    { route_id: "R3", pickup: " a ", drop: "b", distance_km: "5" },
+    { route_id: "R2", pickup: "C", drop: "D", distance_km: "3" },
+  ];
+  const original = structuredClone(data);
+  const canonical = canonicalData(data);
+  assert.equal(canonical.locations.length, 7);
+  assert.deepEqual(eligibleRoutes(canonical.locations).map((row) => row.distance_km), ["1", "3"]);
+  const result = generateRides(criteria(), data, { seed: "test-seed", batchId: "SYN-FILTER" });
+  assert.ok(result.rides.length);
+  assert.ok(result.rides.every((ride) => ride.distance_km >= 1 && ((ride.pickup === "A" && ride.drop === "B") || (ride.pickup === "C" && ride.drop === "D"))));
+  assert.ok(result.warnings.some((warning) => warning.startsWith("5 uploaded routes skipped")));
+  assert.deepEqual(validateGeneratedRides(result, canonical), []);
+  assert.deepEqual(data, original);
+  data.locations = original.locations.slice(0, 2);
+  assert.throws(() => generateRides(criteria(), data), /No eligible pickup\/drop routes remain/);
+});
+
+test("generation filters missing, malformed, out-of-range, and sub-kilometre distances before fare calculation", () => {
+  const data = fixtures();
+  data.locations = ["", "NaN", "-2", "0", "0.999", "2001", "1.1234567", "1", "2000"].map((distance, index) => ({ route_id: `R${index}`, pickup: `A${index}`, drop: `B${index}`, distance_km: distance }));
+  const canonical = canonicalData(data);
+  assert.equal(canonical.locations.length, 9);
+  assert.deepEqual(eligibleRoutes(canonical.locations).map((row) => row.distance_km), ["1", "2000"]);
+  const result = generateRides(criteria(), data, { seed: "test-seed", batchId: "SYN-DISTANCE" });
+  assert.ok(result.rides.length);
+  assert.ok(result.rides.every((ride) => ride.distance_km === 1));
+  assert.deepEqual(validateGeneratedRides(result, canonical), []);
+});
 
 test("GST calculation reconciles gross, net, and GST in integer paise", () => {
   assert.deepEqual(gstSplit(105), { grossPaise: 10500, netPaise: 10000, gstPaise: 500 });

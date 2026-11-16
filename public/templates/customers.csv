@@ -1,3 +1,3 @@
-customer_id,name,registered_at
+user_ID,user_name,date_registered
 C001,Sample User One,2025-10-01
 C002,Sample User Two,2025-10-15T10:30:00+05:30
